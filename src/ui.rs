@@ -1,5 +1,5 @@
-use crate::config::Server;
-use dialoguer::{theme::ColorfulTheme, Input, Select};
+use crate::config::{Server, AuthType};
+use dialoguer::{theme::ColorfulTheme, Input, Select, Password};
 use console::Term;
 
 pub enum Action {
@@ -59,11 +59,39 @@ pub fn add_server_prompt() -> Server {
         .interact_text()
         .unwrap();
 
+    let auth_modes = vec!["Password", "SSH Key", "SSH Agent (No auth stored)"];
+    let auth_selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Authentication Method")
+        .default(0)
+        .items(&auth_modes)
+        .interact()
+        .unwrap();
+
+    let auth_type = match auth_selection {
+        0 => {
+             let pass = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("Password")
+                .interact()
+                .unwrap();
+             AuthType::Password(pass)
+        },
+        1 => {
+            let key_path: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Path to Private Key")
+                .default("~/.ssh/id_rsa".to_string())
+                .interact_text()
+                .unwrap();
+            AuthType::Key(key_path)
+        },
+        _ => AuthType::Agent,
+    };
+
     Server {
         name,
         user,
         host,
         port,
+        auth_type,
     }
 }
 

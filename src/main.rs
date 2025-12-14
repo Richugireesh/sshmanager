@@ -1,7 +1,7 @@
 mod config;
 mod ui;
 
-use config::Config;
+use config::{Config, AuthType};
 use std::process::Command;
 use tabled::{Table, Tabled};
 
@@ -16,6 +16,8 @@ struct ServerDisplay {
     host: String,
     #[tabled(rename = "Port")]
     port: u16,
+    #[tabled(rename = "Auth")]
+    auth_mode: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,12 +30,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let server = &config.servers[index];
                     println!("🚀 Connecting to {} ({}@{})...", server.name, server.user, server.host);
                     
-                    // We need to use std::process::Command with .status() to inherit stdio
-                    let status = Command::new("ssh")
-                        .arg("-p")
-                        .arg(server.port.to_string())
-                        .arg(format!("{}@{}", server.user, server.host))
-                        .status();
+                    let mut cmd;
+                    match &server.auth_type {
+                        AuthType::Password(pass) => {
+                            // Check if sshpass is installed
+                            if check_sshpass() {
+                                cmd = Command::new("sshpass");
+                                cmd.arg("-p").arg(pass);
+                                cmd.arg("ssh");
+                            } else {
+                                println!("⚠️  'sshpass' not found. You will need to enter the password manually.");
+                                cmd = Command::new("ssh");
+                            }
+                        },
+                        AuthType::Key(path) => {
+                            cmd = Command::new("ssh");
+                            cmd.arg("-i").arg(path);
+                        },
+                        AuthType::Agent => {
+                            cmd = Command::new("ssh");
+                        }
+                    }
+
+                    // Common SSH args
+                    cmd.arg("-p")
+                       .arg(server.port.to_string())
+                       .arg(format!("{}@{}", server.user, server.host));
+
+                    let status = cmd.status();
 
                     match status {
                         Ok(s) => {
@@ -41,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("❌ SSH connection exited with error code: {:?}", s.code());
                             }
                         },
-                        Err(e) => println!("❌ Failed to execute ssh: {}", e),
+                        Err(e) => println!("❌ Failed to execute ssh command: {}", e),
                     }
                     
                     println!("\nPress Enter to continue...");
@@ -72,6 +96,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         user: s.user.clone(),
                         host: s.host.clone(),
                         port: s.port,
+                        auth_mode: match &s.auth_type {
+                            AuthType::Password(_) => "🔑 Password".to_string(),
+                            AuthType::Key(_) => "🗝️ Key".to_string(),
+                            AuthType::Agent => "🕵️ Agent".to_string(),
+                        },
                     }).collect();
                     
                     println!("{}", Table::new(display_list).to_string());
@@ -87,4 +116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn check_sshpass() -> bool {
+    Command::new("sshpass").arg("-V").output().is_ok()
 }
