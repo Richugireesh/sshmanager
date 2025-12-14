@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use hmac::Hmac;
 use sha2::Sha256;
 use std::fs;
+use std::io::BufReader;
 use std::path::PathBuf;
 use rpassword;
+use ssh2_config::SshConfig;
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -30,6 +32,12 @@ pub struct Server {
     pub host: String,
     pub port: u16,
     pub auth_type: AuthType,
+    #[serde(default = "default_group")]
+    pub group: String,
+}
+
+fn default_group() -> String {
+    "General".to_string()
 }
 
 #[derive(Deserialize)]
@@ -63,21 +71,19 @@ impl Config {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let config_path = get_config_path()?;
         
-        // Debug
-        // println!("DEBUG: Loading config from {:?}", config_path);
-
         if !config_path.exists() {
             return Ok(Config::new());
         }
 
         let content = fs::read_to_string(&config_path)?;
         
-        // 1. Try parsing as current format (Vec<Server>) - Unencrypted but with auth_type
-        if let Ok(servers) = serde_json::from_str::<Vec<Server>>(&content) {
+        // 1. Unencrypted New Format
+        if let Ok(mut servers) = serde_json::from_str::<Vec<Server>>(&content) {
+             // Ensure group is set (handled by serde default but explicit check doesn't hurt if we were manually parsing)
              return Ok(Config { servers, master_password: None });
         }
 
-        // 2. Try parsing as Legacy format (Vec<LegacyServer>) - Unencrypted, no auth_type
+        // 2. Legacy Format
         if let Ok(legacy_servers) = serde_json::from_str::<Vec<LegacyServer>>(&content) {
             println!("ℹ️  Legacy configuration detected. Migrating...");
             let servers = legacy_servers.into_iter().map(|ls| Server {
@@ -85,12 +91,13 @@ impl Config {
                 user: ls.user,
                 host: ls.host,
                 port: ls.port,
-                auth_type: AuthType::Agent, // Default to standard SSH behavior (manual password or agent)
+                auth_type: AuthType::Agent,
+                group: "General".to_string(),
             }).collect();
             return Ok(Config { servers, master_password: None });
         }
 
-        // 3. Try parsing as EncryptedConfig
+        // 3. Encrypted Config
         let enc_config: EncryptedConfig = serde_json::from_str(&content).map_err(|e| {
              format!("Failed to parse config file at {:?}: {}", config_path, e)
         })?;
@@ -168,6 +175,58 @@ impl Config {
         if index < self.servers.len() {
             self.servers.remove(index);
         }
+    }
+
+    pub fn import_ssh_config(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
+        let ssh_dir = dirs::home_dir().ok_or("No home dir")?.join(".ssh");
+        let config_path = ssh_dir.join("config");
+        
+        if !config_path.exists() {
+            return Ok(0);
+        }
+
+        let mut reader = BufReader::new(fs::File::open(config_path)?);
+        let config = SshConfig::default().parse(&mut reader, ssh2_config::ParseRule::ALLOW_UNKNOWN_FIELDS)?;
+        
+        let mut count = 0;
+        
+        let file_content = fs::read_to_string(ssh_dir.join("config"))?;
+            
+        for line in file_content.lines() {
+            let line = line.trim();
+            if line.starts_with("Host ") {
+                let host_alias = line.trim_start_matches("Host ").trim();
+                if host_alias.contains('*') { continue; } 
+                
+                let params = config.query(host_alias);
+                
+                let hostname = params.host_name.unwrap_or(host_alias.to_string());
+                let user = params.user.unwrap_or(whoami::username());
+                let port = params.port.unwrap_or(22);
+                // identity_file is Option<Vec<PathBuf>>
+                let identity = params.identity_file.and_then(|files| files.first().map(|p| p.to_string_lossy().to_string()));
+
+                
+                // Check duplicate
+                if !self.servers.iter().any(|s| s.name == host_alias) {
+                    self.servers.push(Server {
+                        name: host_alias.to_string(),
+                        user,
+                        host: hostname,
+                        port,
+                        auth_type: if let Some(path) = identity {
+                            AuthType::Key(path)
+                        } else {
+                            AuthType::Agent // Default to agent if no key specified but in config
+                        },
+                        group: "Imported".to_string(),
+                    });
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
     }
 }
 

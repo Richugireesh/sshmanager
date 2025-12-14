@@ -7,7 +7,7 @@ edition = "2021"
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-dialoguer = "0.11"
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 console = "0.15"
 dirs = "5.0"
 tabled = "0.15"
@@ -20,3 +20,5 @@ base64 = "0.21"
 rpassword = "7.0"
 ssh2 = "0.9"
 crossterm = "0.27"
+ssh2-config = "0.2"
+whoami = "1.4"

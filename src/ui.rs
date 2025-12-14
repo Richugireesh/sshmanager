@@ -1,5 +1,5 @@
 use crate::config::{Server, AuthType};
-use dialoguer::{theme::ColorfulTheme, Input, Select, Password};
+use dialoguer::{theme::ColorfulTheme, Input, Select, Password, FuzzySelect};
 use console::Term;
 
 pub enum Action {
@@ -7,6 +7,7 @@ pub enum Action {
     AddServer,
     RemoveServer,
     ListServers,
+    ImportConfig,
     Exit,
 }
 
@@ -16,6 +17,7 @@ pub fn main_menu() -> Action {
         "➕ Add New Server",
         "🗑️  Remove Server",
         "📋 List Servers",
+        "📥 Import from SSH Config",
         "🚪 Exit",
     ];
 
@@ -24,13 +26,14 @@ pub fn main_menu() -> Action {
         .default(0)
         .items(&items)
         .interact_on(&Term::stderr())
-        .unwrap_or(4); 
+        .unwrap_or(5); 
 
     match selection {
         0 => Action::Connect,
         1 => Action::AddServer,
         2 => Action::RemoveServer,
         3 => Action::ListServers,
+        4 => Action::ImportConfig,
         _ => Action::Exit,
     }
 }
@@ -38,6 +41,12 @@ pub fn main_menu() -> Action {
 pub fn add_server_prompt() -> Server {
     println!("📝 Enter server details:");
     
+    let group: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Group")
+        .default("General".to_string())
+        .interact_text()
+        .unwrap();
+
     let name: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Server Name (alias)")
         .interact_text()
@@ -92,6 +101,7 @@ pub fn add_server_prompt() -> Server {
         host,
         port,
         auth_type,
+        group,
     }
 }
 
@@ -103,11 +113,12 @@ pub fn select_server(servers: &[Server]) -> Option<usize> {
 
     let items: Vec<String> = servers
         .iter()
-        .map(|s| format!("{} ({}@{}:{})", s.name, s.user, s.host, s.port))
+        .map(|s| format!("[{}] {} ({}@{}:{})", s.group, s.name, s.user, s.host, s.port))
         .collect();
 
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select a server")
+    // Use FuzzySelect for search filtering
+    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a server (Type to search)")
         .default(0)
         .items(&items)
         .interact_on(&Term::stderr())

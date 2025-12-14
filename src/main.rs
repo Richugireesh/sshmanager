@@ -13,6 +13,8 @@ use tabled::{Table, Tabled};
 // Wrapper for Tabled to print Server nicely
 #[derive(Tabled)]
 struct ServerDisplay {
+    #[tabled(rename = "Group")]
+    group: String,
     #[tabled(rename = "Alias")]
     name: String,
     #[tabled(rename = "User")]
@@ -60,11 +62,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::thread::sleep(std::time::Duration::from_millis(1000));
                 }
             }
+            ui::Action::ImportConfig => {
+                println!("📥 Importing servers from ~/.ssh/config...");
+                match config.import_ssh_config() {
+                    Ok(count) => {
+                        config.save()?;
+                        println!("✅ Imported {} servers.", count);
+                    },
+                    Err(e) => println!("❌ Import failed: {}", e),
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+            }
             ui::Action::ListServers => {
                 if config.servers.is_empty() {
                     println!("⚠️  No servers found.");
                 } else {
                     let display_list: Vec<ServerDisplay> = config.servers.iter().map(|s| ServerDisplay {
+                        group: s.group.clone(),
                         name: s.name.clone(),
                         user: s.user.clone(),
                         host: s.host.clone(),
@@ -124,10 +138,9 @@ fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel();
     
     // Spawn thread to read Stdin
-    // We use a separate thread because Stdin::read is blocking
     thread::spawn(move || {
         let mut stdin = std::io::stdin();
-        let mut buf = [0u8; 1]; // Read byte by byte for responsiveness
+        let mut buf = [0u8; 1];
         loop {
             match stdin.read(&mut buf) {
                 Ok(1) => {
@@ -147,17 +160,12 @@ fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // 1. Write Stdin -> SSH
         while let Ok(byte) = rx.try_recv() {
-            // Write to channel
-            // Note: In non-blocking mode, write might error with WouldBlock?
-            // Usually internal buffer handles small writes.
-            // ssh2::Channel doesn't explicitly guarantee infinite buffering but for 1 byte it's fine.
             let _ = channel.write(&[byte]);
         }
 
         // 2. Read SSH -> Stdout
         match channel.read(&mut buf) {
             Ok(0) => {
-                // EOF from server?
                 if channel.eof() {
                    break;
                 }
@@ -176,11 +184,9 @@ fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         
-        // Small sleep to prevent 100% CPU
         thread::sleep(std::time::Duration::from_millis(5));
     }
     
-    // Cleanup
     let _ = channel.close();
     let _ = channel.wait_close();
     disable_raw_mode()?;
