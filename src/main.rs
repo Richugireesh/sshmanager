@@ -6,9 +6,12 @@ use std::net::TcpStream;
 use std::io::{Read, Write};
 use std::thread;
 use std::sync::mpsc;
+use std::path::Path;
+use std::fs::File;
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
 use ssh2::Session;
 use tabled::{Table, Tabled};
+use indicatif::{ProgressBar, ProgressStyle};
 
 // Wrapper for Tabled to print Server nicely
 #[derive(Tabled)]
@@ -37,12 +40,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let server = &config.servers[index];
                     println!("🚀 Connecting to {} ({}@{})...", server.name, server.user, server.host);
                     
-                    if let Err(e) = connect_ssh(server) {
-                         println!("❌ Connection failed: {}", e);
+                    match create_session(server) {
+                        Ok(sess) => {
+                             if let Err(e) = run_shell(sess) {
+                                 println!("❌ Connection failed: {}", e);
+                             }
+                        },
+                        Err(e) => println!("❌ Connection failed: {}", e),
                     }
                     
-                    // Ensure raw mode is disabled if it wasn't already
                     let _ = disable_raw_mode();
+                    println!("\nPress Enter to continue...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                }
+            }
+            ui::Action::FileTransfer => {
+                if let Some(index) = ui::select_server(&config.servers) {
+                    let server = &config.servers[index];
+                    println!("🚀 Connecting to {} for SFTP...", server.name);
+
+                     match create_session(server) {
+                        Ok(sess) => {
+                             if let Err(e) = run_sftp(sess) {
+                                 println!("❌ SFTP failed: {}", e);
+                             }
+                        },
+                        Err(e) => println!("❌ Connection failed: {}", e),
+                    }
                     println!("\nPress Enter to continue...");
                     let _ = std::io::stdin().read_line(&mut String::new());
                 }
@@ -105,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
+fn create_session(server: &Server) -> Result<Session, Box<dyn std::error::Error>> {
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))?;
     let mut sess = Session::new()?;
     sess.set_tcp_stream(tcp);
@@ -122,33 +146,27 @@ fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
     if !sess.authenticated() {
         return Err("Authentication failed".into());
     }
-
-    let mut channel = sess.channel_session()?;
     
-    // Create a PTY
+    Ok(sess)
+}
+
+fn run_shell(sess: Session) -> Result<(), Box<dyn std::error::Error>> {
+    let mut channel = sess.channel_session()?;
     channel.request_pty("xterm-256color", None, None)?;
     channel.shell()?;
 
     enable_raw_mode()?;
-
-    // Set non-blocking to handle IO loop
     sess.set_blocking(false);
 
-    // Channel for Stdin -> Main Thread
     let (tx, rx) = mpsc::channel();
     
-    // Spawn thread to read Stdin
     thread::spawn(move || {
         let mut stdin = std::io::stdin();
         let mut buf = [0u8; 1];
         loop {
             match stdin.read(&mut buf) {
-                Ok(1) => {
-                    if tx.send(buf[0]).is_err() {
-                        break; 
-                    }
-                }
-                Ok(_) => break, // EOF
+                Ok(1) => { if tx.send(buf[0]).is_err() { break; } }
+                Ok(_) => break,
                 Err(_) => break,
             }
         }
@@ -158,38 +176,82 @@ fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout();
 
     loop {
-        // 1. Write Stdin -> SSH
         while let Ok(byte) = rx.try_recv() {
             let _ = channel.write(&[byte]);
         }
 
-        // 2. Read SSH -> Stdout
         match channel.read(&mut buf) {
-            Ok(0) => {
-                if channel.eof() {
-                   break;
-                }
-            }
-            Ok(n) => {
-                stdout.write_all(&buf[..n])?;
-                stdout.flush()?;
-            }
-             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data
-            },
+            Ok(0) => { if channel.eof() { break; } }
+            Ok(n) => { stdout.write_all(&buf[..n])?; stdout.flush()?; }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
             Err(e) => return Err(e.into()),
         }
 
-        if channel.eof() {
-            break;
-        }
-        
+        if channel.eof() { break; }
         thread::sleep(std::time::Duration::from_millis(5));
     }
     
     let _ = channel.close();
     let _ = channel.wait_close();
     disable_raw_mode()?;
+    Ok(())
+}
 
+fn run_sftp(sess: Session) -> Result<(), Box<dyn std::error::Error>> {
+    let sftp = sess.sftp()?;
+    let direction = ui::file_transfer_menu();
+    
+    match direction {
+        ui::TransferDirection::Upload => {
+            let local_path = ui::get_local_path("Local file path");
+            let remote_path = ui::get_remote_path("Remote destination path");
+            
+            let mut file = File::open(&local_path)?;
+            let file_size = file.metadata()?.len();
+            
+            let mut remote_file = sftp.create(Path::new(&remote_path))?;
+            
+            let pb = ProgressBar::new(file_size);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"));
+            
+            let mut buffer = [0u8; 8192]; // 8KB chunks
+            loop {
+                let n = file.read(&mut buffer)?;
+                if n == 0 { break; }
+                remote_file.write_all(&buffer[..n])?;
+                pb.inc(n as u64);
+            }
+            pb.finish_with_message("Upload complete");
+        },
+        ui::TransferDirection::Download => {
+            let remote_path = ui::get_remote_path("Remote file path");
+            let local_path = ui::get_local_path("Local destination path");
+            
+            let mut remote_file = sftp.open(Path::new(&remote_path))?;
+            let file_stat = remote_file.stat()?;
+            let file_size = file_stat.size.unwrap_or(0);
+            
+            let mut file = File::create(&local_path)?;
+            
+            let pb = ProgressBar::new(file_size);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"));
+                
+            let mut buffer = [0u8; 8192];
+            loop {
+                let n = remote_file.read(&mut buffer)?;
+                if n == 0 { break; }
+                file.write_all(&buffer[..n])?;
+                pb.inc(n as u64);
+            }
+            pb.finish_with_message("Download complete");
+        }
+    }
+    
     Ok(())
 }

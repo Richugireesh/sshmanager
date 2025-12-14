@@ -8,7 +8,13 @@ pub enum Action {
     RemoveServer,
     ListServers,
     ImportConfig,
+    FileTransfer,
     Exit,
+}
+
+pub enum TransferDirection {
+    Upload,
+    Download,
 }
 
 pub fn main_menu() -> Action {
@@ -18,6 +24,7 @@ pub fn main_menu() -> Action {
         "🗑️  Remove Server",
         "📋 List Servers",
         "📥 Import from SSH Config",
+        "📂 File Transfer (SFTP)",
         "🚪 Exit",
     ];
 
@@ -26,7 +33,7 @@ pub fn main_menu() -> Action {
         .default(0)
         .items(&items)
         .interact_on(&Term::stderr())
-        .unwrap_or(5); 
+        .unwrap_or(6); 
 
     match selection {
         0 => Action::Connect,
@@ -34,8 +41,38 @@ pub fn main_menu() -> Action {
         2 => Action::RemoveServer,
         3 => Action::ListServers,
         4 => Action::ImportConfig,
+        5 => Action::FileTransfer,
         _ => Action::Exit,
     }
+}
+
+pub fn file_transfer_menu() -> TransferDirection {
+    let items = vec!["⬆️  Upload (Local -> Remote)", "⬇️  Download (Remote -> Local)"];
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select transfer direction")
+        .default(0)
+        .items(&items)
+        .interact()
+        .unwrap();
+
+    match selection {
+        0 => TransferDirection::Upload,
+        _ => TransferDirection::Download,
+    }
+}
+
+pub fn get_local_path(prompt: &str) -> String {
+    Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .interact_text()
+        .unwrap()
+}
+
+pub fn get_remote_path(prompt: &str) -> String {
+    Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .interact_text()
+        .unwrap()
 }
 
 pub fn add_server_prompt() -> Server {
@@ -116,7 +153,6 @@ pub fn select_server(servers: &[Server]) -> Option<usize> {
         .map(|s| format!("[{}] {} ({}@{}:{})", s.group, s.name, s.user, s.host, s.port))
         .collect();
 
-    // Use FuzzySelect for search filtering
     let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
         .with_prompt("Select a server (Type to search)")
         .default(0)
