@@ -20,7 +20,7 @@ A beautiful, secure, and interactive CLI tool to manage your SSH connections. Bu
 Ensure you have Rust installed. Clone the repository and build:
 
 ```bash
-git clone https://github.com/yourusername/ssh-manager.git
+git clone https://github.com/richugireesh/ssh-manager.git
 cd ssh-manager
 cargo build --release
 ```
