@@ -1,8 +1,13 @@
 mod config;
 mod ui;
 
-use config::{Config, AuthType};
-use std::process::Command;
+use config::{Config, AuthType, Server};
+use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::thread;
+use std::sync::mpsc;
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+use ssh2::Session;
 use tabled::{Table, Tabled};
 
 // Wrapper for Tabled to print Server nicely
@@ -30,44 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let server = &config.servers[index];
                     println!("🚀 Connecting to {} ({}@{})...", server.name, server.user, server.host);
                     
-                    let mut cmd;
-                    match &server.auth_type {
-                        AuthType::Password(pass) => {
-                            // Check if sshpass is installed
-                            if check_sshpass() {
-                                cmd = Command::new("sshpass");
-                                cmd.arg("-p").arg(pass);
-                                cmd.arg("ssh");
-                            } else {
-                                println!("⚠️  'sshpass' not found. You will need to enter the password manually.");
-                                cmd = Command::new("ssh");
-                            }
-                        },
-                        AuthType::Key(path) => {
-                            cmd = Command::new("ssh");
-                            cmd.arg("-i").arg(path);
-                        },
-                        AuthType::Agent => {
-                            cmd = Command::new("ssh");
-                        }
-                    }
-
-                    // Common SSH args
-                    cmd.arg("-p")
-                       .arg(server.port.to_string())
-                       .arg(format!("{}@{}", server.user, server.host));
-
-                    let status = cmd.status();
-
-                    match status {
-                        Ok(s) => {
-                            if !s.success() {
-                                println!("❌ SSH connection exited with error code: {:?}", s.code());
-                            }
-                        },
-                        Err(e) => println!("❌ Failed to execute ssh command: {}", e),
+                    if let Err(e) = connect_ssh(server) {
+                         println!("❌ Connection failed: {}", e);
                     }
                     
+                    // Ensure raw mode is disabled if it wasn't already
+                    let _ = disable_raw_mode();
                     println!("\nPress Enter to continue...");
                     let _ = std::io::stdin().read_line(&mut String::new());
                 }
@@ -118,6 +91,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn check_sshpass() -> bool {
-    Command::new("sshpass").arg("-V").output().is_ok()
+fn connect_ssh(server: &Server) -> Result<(), Box<dyn std::error::Error>> {
+    let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))?;
+    let mut sess = Session::new()?;
+    sess.set_tcp_stream(tcp);
+    sess.handshake()?;
+
+    match &server.auth_type {
+        AuthType::Password(p) => sess.userauth_password(&server.user, p)?,
+        AuthType::Key(p) => sess.userauth_pubkey_file(&server.user, None, std::path::Path::new(p), None)?,
+        AuthType::Agent => {
+            sess.userauth_agent(&server.user)?;
+        }
+    }
+
+    if !sess.authenticated() {
+        return Err("Authentication failed".into());
+    }
+
+    let mut channel = sess.channel_session()?;
+    
+    // Create a PTY
+    channel.request_pty("xterm-256color", None, None)?;
+    channel.shell()?;
+
+    enable_raw_mode()?;
+
+    // Set non-blocking to handle IO loop
+    sess.set_blocking(false);
+
+    // Channel for Stdin -> Main Thread
+    let (tx, rx) = mpsc::channel();
+    
+    // Spawn thread to read Stdin
+    // We use a separate thread because Stdin::read is blocking
+    thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 1]; // Read byte by byte for responsiveness
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(1) => {
+                    if tx.send(buf[0]).is_err() {
+                        break; 
+                    }
+                }
+                Ok(_) => break, // EOF
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut buf = [0u8; 2048];
+    let mut stdout = std::io::stdout();
+
+    loop {
+        // 1. Write Stdin -> SSH
+        while let Ok(byte) = rx.try_recv() {
+            // Write to channel
+            // Note: In non-blocking mode, write might error with WouldBlock?
+            // Usually internal buffer handles small writes.
+            // ssh2::Channel doesn't explicitly guarantee infinite buffering but for 1 byte it's fine.
+            let _ = channel.write(&[byte]);
+        }
+
+        // 2. Read SSH -> Stdout
+        match channel.read(&mut buf) {
+            Ok(0) => {
+                // EOF from server?
+                if channel.eof() {
+                   break;
+                }
+            }
+            Ok(n) => {
+                stdout.write_all(&buf[..n])?;
+                stdout.flush()?;
+            }
+             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No data
+            },
+            Err(e) => return Err(e.into()),
+        }
+
+        if channel.eof() {
+            break;
+        }
+        
+        // Small sleep to prevent 100% CPU
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    
+    // Cleanup
+    let _ = channel.close();
+    let _ = channel.wait_close();
+    disable_raw_mode()?;
+
+    Ok(())
 }
