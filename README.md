@@ -7,11 +7,12 @@ A beautiful, secure, and interactive CLI tool to manage your SSH connections. Bu
 
 ## ✨ Features
 
+- **🖥️ TUI Dashboard**: Modern, interactive terminal interface using `ratatui`.
 - **🔐 Encrypted Storage**: All server details and passwords are safely encrypted using AES-256-GCM.
-- **🚀 Native SSH Client**: Connects directly using the `ssh2` library - no external dependencies like `sshpass` required.
+- **🚀 Native SSH Client**: Connects directly using the `ssh2` library.
 - **📂 Groups & Organization**: Organize your servers into custom groups (e.g., Prod, Dev, Staging).
-- **📥 Import Support**: Automatically import hosts from your existing `~/.ssh/config`.
-- **🔍 Fuzzy Search**: Quickly find servers by typing in the interactive menu.
+- **📥 Import Support**: Press `i` to import hosts from `~/.ssh/config`.
+- **📂 SFTP Support**: Press `t` to Upload/Download files.
 - **💅 Beautiful UI**: Rich terminal interface with colors and intuitive navigation.
 - **🔑 Multiple Auth Methods**: Supports Password, SSH Key (Identity File), and SSH Agent.
 
